@@ -1,16 +1,14 @@
-
-
 pub struct User {
-    email: String, 
-    passwor: String, 
-    require_2fa: bool,
+    pub email: String,
+    pub password: String,
+    pub require_2fa: bool,
 }
 
-impl user {
+impl User {
     pub fn new(email: String, password: String, require_2fa: bool) -> Self {
         User {
-            email, 
-            password, 
+            email,
+            password,
             require_2fa,
         }
     }
