@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::{    app_state::AppState,};
 use crate::AuthAPIError;
 use crate::domain::user::User;
-use crate::domain::data_stores::UserStore;
-use futures_util::TryFutureExt;
 
 #[derive(Deserialize)]
 pub struct SignupRequest {

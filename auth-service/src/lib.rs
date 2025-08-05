@@ -1,75 +1,48 @@
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response, Html},
-    routing::post,
-    serve::Serve,
-    routing::get,
-    Json, Router,
-};
-use crate::domain::error::AuthAPIError;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::{
-    routes::{signup, login, logout, verify_2fa, verify_token},
-    app_state::AppState,
-    services::hashmap_user_store::HashmapUserStore,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum_extra::extract::CookieJar;
+use serde::Deserialize;
 
-pub mod routes;
-pub mod services;
-pub mod app_state;
+
+// Déclaration des modules
 pub mod domain;
+pub mod utils;
+pub mod app_state;
+pub mod routes;
 
-pub struct Application {
-    server: Serve<Router, Router>,
-    pub address: String,
+// Imports des types nécessaires
+use domain::error::AuthAPIError;
+use utils::auth::generate_auth_cookie;
+use app_state::AppState;
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
 }
 
-async fn root() -> Html<&'static str> {
-    Html("<!DOCTYPE html><html><body><h1>Welcome to the Auth Service</h1></body></html>")
-}
+pub async fn login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(request): Json<LoginRequest>,
+) -> (CookieJar, Result<impl IntoResponse, AuthAPIError>) {
+    let user_store = &state.user_store.read().await;
 
-impl Application {
-    pub async fn build(app_state: AppState, address: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let router = Router::new()
-            .route("/", get(root))
-            .route("/signup", post(signup))
-            .route("/login", post(login))
-            .route("/verify-2fa", post(verify_2fa))
-            .route("/logout", post(logout))
-            .route("/verify-token", post(verify_token))
-            .with_state(app_state);
+    // Validate user credentials and handle the Result
+    user_store.validate_user(&request.email, &request.password)
+        .await
+        .map_err(|_| AuthAPIError::IncorrectCredentials)?;
 
-        let listener = tokio::net::TcpListener::bind(address).await?;
-        let address = listener.local_addr()?.to_string();
-        let server = axum::serve(listener, router);
+    // Get the user and handle the Result
+    let user = user_store.get_user(&request.email)
+        .await
+        .map_err(|_| AuthAPIError::IncorrectCredentials)?;
 
-        Ok(Application { server, address })
-    }
+    // Generate the authentication cookie
+    let auth_cookie = generate_auth_cookie(&user.email)
+        .map_err(|_| AuthAPIError::UnexpectedError)?;
 
-    pub async fn run(self) -> Result<(), std::io::Error> {
-        println!("listening on {}", &self.address);
-        self.server.await
-    }
-}
+    // Add the cookie to the CookieJar
+    let updated_jar = jar.add(auth_cookie);
 
-#[derive(Serialize, Deserialize)]
-pub struct ErrorResponse {
-    pub error: String, 
-}
-
-impl IntoResponse for AuthAPIError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            AuthAPIError::UserAlreadyExists => (StatusCode::CONFLICT, "User already exists"),
-            AuthAPIError::IncorrectCredentials => (StatusCode::UNAUTHORIZED, "Incorrect credentials"),
-            AuthAPIError::InvalidCredentials => (StatusCode::BAD_REQUEST, "Invalid credentials"),
-            AuthAPIError::UnexpectedError => (StatusCode::INTERNAL_SERVER_ERROR, "Unexpected error"),
-        };
-        let body = Json(ErrorResponse {
-            error: error_message.to_string(),
-        });
-        (status, body).into_response()
-    }
+    (updated_jar, Ok(StatusCode::OK))
 }
