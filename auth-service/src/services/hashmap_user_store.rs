@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use async_trait::async_trait;
 use crate::domain::user::User;
 use crate::domain::data_stores::{UserStoreError, UserStore};
 
@@ -24,8 +23,8 @@ impl UserStore for HashmapUserStore {
         }
     }
 
-    async fn get_user(&self, email: &str) -> Result<&User, UserStoreError> {
-        self.users.get(email).ok_or(UserStoreError::UserNotFound)
+    async fn get_user(&self, email: &str) -> Result<User, UserStoreError> { // CORRECTION: retourne User clonée
+        self.users.get(email).cloned().ok_or(UserStoreError::UserNotFound)
     }
 
     async fn validate_user(&self, email: &str, password: &str) -> Result<(), UserStoreError> {

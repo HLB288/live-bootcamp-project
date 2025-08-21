@@ -1,9 +1,9 @@
 use crate::helper::TestApp;
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
-use auth_service::{routes::SignupResponse, ErrorResponse};
+use auth_service::domain::error::ErrorResponse; // CORRECTION: import correct
 
-pub async fn signup(Json(request): Json<SignupRequest>) -> impl IntoResponse {
+pub async fn signup(Json(_request): Json<SignupRequest>) -> impl IntoResponse { // CORRECTION: préfixe avec _
     StatusCode::OK.into_response()
 }
 
