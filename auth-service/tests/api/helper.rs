@@ -1,8 +1,13 @@
 use auth_service::{
     Application,
-    app_state::AppState,
-    services::{hashmap_user_store::HashmapUserStore, hashset_banned_token_store::HashsetBannedTokenStore},
-    domain::data_stores::{UserStore, BannedTokenStore, BannedTokenStoreError},
+    app_state::{AppState, BannedTokenStoreType, TwoFACodeStoreType}, // AJOUT: types du app_state
+    services::{
+        hashmap_user_store::HashmapUserStore, 
+        hashset_banned_token_store::HashsetBannedTokenStore,
+        hashmap_two_fa_code_store::HashmapTwoFACodeStore,
+        mock_email_client::MockEmailClient, // AJOUT
+    },
+    domain::data_stores::{UserStore, BannedTokenStore, TwoFACodeStore, BannedTokenStoreError},
     utils::constants::test,
 };
 use reqwest::Response;
@@ -33,26 +38,23 @@ impl BannedTokenStore for TestBannedTokenStoreWrapper {
 pub struct TestApp {
     pub address: String,
     pub cookie_jar: Arc<Jar>,
+    pub banned_token_store: BannedTokenStoreType,
+    pub two_fa_code_store: TwoFACodeStoreType, // New!
     pub http_client: reqwest::Client,
-    pub banned_token_store: Arc<RwLock<HashsetBannedTokenStore>>, // CORRECTION: type concret au lieu de trait object
 }
 
 impl TestApp {
     pub async fn new() -> Self {
-        // Create an instance of HashmapUserStore
-        let user_store = HashmapUserStore::default();
-        let user_store = Box::new(user_store) as Box<dyn UserStore + Send + Sync>;
+        let user_store = Arc::new(RwLock::new(Box::new(HashmapUserStore::default()) as Box<dyn UserStore + Send + Sync>));
+        let banned_token_store = Arc::new(RwLock::new(Box::new(HashsetBannedTokenStore::default()) as Box<dyn BannedTokenStore + Send + Sync>));
+        let two_fa_code_store = Arc::new(RwLock::new(Box::new(HashmapTwoFACodeStore::default()) as Box<dyn TwoFACodeStore + Send + Sync>)); // New!
+        let email_client = Arc::new(MockEmailClient); // AJOUT
 
-        // Create an instance of HashsetBannedTokenStore
-        let banned_token_store = Arc::new(RwLock::new(HashsetBannedTokenStore::new()));
-        let banned_token_store_for_app = banned_token_store.clone(); // CORRECTION: cloner l'Arc, pas le contenu
-
-        // Create an AppState instance with the user_store and banned_token_store
         let app_state = AppState::new(
-            user_store, 
-            Box::new(TestBannedTokenStoreWrapper {
-                inner: banned_token_store_for_app.clone()
-            }) as Box<dyn BannedTokenStore + Send + Sync>
+            user_store,
+            banned_token_store.clone(),
+            two_fa_code_store.clone(),
+            email_client, // AJOUT
         );
 
         // Build the application using the test address
@@ -72,7 +74,7 @@ impl TestApp {
 
         // Create an HTTP client
         let http_client = reqwest::Client::builder()
-            .cookie_store(true) // CORRECTION: cookie_store au lieu de cookie_provider
+            .cookie_store(true)
             .build()
             .unwrap();
 
@@ -80,8 +82,9 @@ impl TestApp {
         Self {
             address,
             cookie_jar,
+            banned_token_store,
+            two_fa_code_store, // New!
             http_client,
-            banned_token_store, // CORRECTION: utiliser la même référence
         }
     }
 
@@ -127,7 +130,7 @@ impl TestApp {
     pub async fn post_login_without_body(&self) -> Response {
         self.http_client
             .post(&format!("{}/login", &self.address))
-            .send() // CORRECTION: pas de JSON = 415 Unsupported Media Type
+            .send()
             .await
             .expect("Failed to send request")
     }
@@ -136,7 +139,7 @@ impl TestApp {
     pub async fn post_login_malformed(&self) -> Response {
         self.http_client
             .post(&format!("{}/login", &self.address))
-            .json(&serde_json::json!({})) // MEILLEURE APPROCHE: JSON vide = 422 (comme pour verify_token)
+            .json(&serde_json::json!({}))
             .send()
             .await
             .expect("Failed to send request")
@@ -158,9 +161,14 @@ impl TestApp {
             .expect("Failed to send request")
     }
 
-    pub async fn post_verify_2fa(&self) -> Response {
+    // MODIFICATION: Maintenant accepte un body comme paramètre
+    pub async fn post_verify_2fa<Body>(&self, body: &Body) -> Response
+    where
+        Body: serde::Serialize,
+    {
         self.http_client
             .post(&format!("{}/verify-2fa", &self.address))
+            .json(body)
             .send()
             .await
             .expect("Failed to send request")

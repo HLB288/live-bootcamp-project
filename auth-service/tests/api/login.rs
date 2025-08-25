@@ -1,5 +1,9 @@
 use crate::helper::{get_random_email, TestApp};
-use auth_service::{utils::constants::JWT_COOKIE_NAME, domain::error::ErrorResponse};
+use auth_service::{
+    utils::constants::JWT_COOKIE_NAME, 
+    domain::{error::ErrorResponse, Email, data_stores::TwoFACodeStore}, // AJOUT: Email et TwoFACodeStore
+    routes::login::TwoFactorAuthResponse
+};
 
 #[tokio::test]
 async fn should_return_422_if_malformed_credentials() {
@@ -86,4 +90,56 @@ async fn should_return_401_if_invalid_token() {
         .unwrap();
 
     assert_eq!(response.status().as_u16(), 401); // La route logout doit valider le token
+}
+
+#[tokio::test]
+async fn should_return_206_if_valid_credentials_and_2fa_enabled() {
+    let app = TestApp::new().await;
+    let random_email = get_random_email();
+
+    // Créer un utilisateur AVEC 2FA activée
+    let signup_body = serde_json::json!({
+        "email": random_email,
+        "password": "password123",
+        "requires2FA": true
+    });
+
+    let response = app.post_signup(&signup_body).await;
+    assert_eq!(response.status().as_u16(), 201);
+
+    // Tenter de se connecter avec les bonnes credentials
+    let login_body = serde_json::json!({
+        "email": random_email,
+        "password": "password123",
+    });
+
+    let response = app.post_login(&login_body).await;
+    
+    // Vérifier le status 206 (2FA required)
+    assert_eq!(response.status().as_u16(), 206);
+    
+    // Vérifier le body JSON avec le bon type
+    let json_body = response
+        .json::<TwoFactorAuthResponse>()
+        .await
+        .expect("Could not deserialize response body to TwoFactorAuthResponse");
+        
+    assert_eq!(json_body.message, "2FA required".to_owned());
+
+    // NOUVEAU: Vérifier que le login_attempt_id est stocké dans le 2FA code store
+    let email = Email(random_email);
+    let two_fa_store = app.two_fa_code_store.read().await;
+    
+    // Vérifier que le code 2FA existe pour cet email
+    let result = two_fa_store.get_code(&email).await;
+    assert!(result.is_ok(), "2FA code should be stored for the email");
+    
+    let (stored_login_attempt_id, _stored_code) = result.unwrap();
+    
+    // Vérifier que l'ID de tentative de connexion correspond à celui retourné dans la réponse
+    assert_eq!(
+        stored_login_attempt_id.as_ref(), 
+        json_body.login_attempt_id,
+        "Login attempt ID in response should match the one stored in 2FA code store"
+    );
 }

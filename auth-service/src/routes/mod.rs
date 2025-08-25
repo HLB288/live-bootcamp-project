@@ -1,4 +1,4 @@
-mod login;
+pub mod login; 
 mod logout;
 mod signup;
 mod verify_2fa;

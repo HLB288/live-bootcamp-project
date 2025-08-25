@@ -6,13 +6,14 @@ use axum::{
 use axum::extract::State;
 use axum_extra::extract::CookieJar;
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir; // AJOUT: pour servir les fichiers statiques
 
 // Import necessary modules
 pub mod domain;
 pub mod utils;
 pub mod app_state;
 pub mod routes;
-pub mod services; // AJOUT: Déclaration du module services
+pub mod services;
 
 // Import types and utilities
 use app_state::AppState;
@@ -20,13 +21,14 @@ use routes::{login, logout, signup, verify_2fa, verify_token};
 
 pub struct Application {
     pub address: String,
-    server: tokio::task::JoinHandle<()>, // AJOUT: handle du serveur
+    server: tokio::task::JoinHandle<()>,
 }
 
 impl Application {
     pub async fn build(app_state: AppState, address: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let allowed_origins = [
             "http://localhost:8000".parse().unwrap(),
+            "http://localhost:8001".parse().unwrap(), // AJOUT: pour l'app-service
             "http://[YOUR_DROPLET_IP]:8000".parse().unwrap(),
         ];
 
@@ -36,12 +38,10 @@ impl Application {
             .allow_origin(allowed_origins);
 
         let router = Router::new()
-            .route("/", get(|| async { 
-                (
-                    [("content-type", "text/html")], 
-                    "<html><body><h1>Auth Service UI</h1></body></html>"
-                )
-            })) 
+            // MODIFICATION: Servir les fichiers statiques depuis le dossier assets
+            .nest_service("/assets", ServeDir::new("assets"))
+            .route("/", get(serve_login_page)) // MODIFICATION: fonction dédiée
+            .route("/signup", get(serve_login_page)) // AJOUT: GET pour /signup aussi
             .route("/signup", post(signup))
             .route("/login", post(login))
             .route("/verify-2fa", post(verify_2fa))
@@ -51,7 +51,7 @@ impl Application {
             .layer(cors);
 
         let listener = tokio::net::TcpListener::bind(address).await?;
-        let actual_address = listener.local_addr()?.to_string(); // CORRECTION: obtenir l'adresse réelle
+        let actual_address = listener.local_addr()?.to_string();
         
         let server = tokio::spawn(async move {
             axum::serve(listener, router)
@@ -60,14 +60,26 @@ impl Application {
         });
 
         Ok(Application {
-            address: actual_address, // CORRECTION: utiliser l'adresse réelle
-            server, // AJOUT: stocker le handle
+            address: actual_address,
+            server,
         })
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Server running on {}", self.address);
-        self.server.await?; // CORRECTION: attendre le serveur
+        self.server.await?;
         Ok(())
     }
 }
+
+// NOUVELLE FONCTION: Servir la page de login depuis le fichier index.html
+async fn serve_login_page() -> Result<axum::response::Html<String>, StatusCode> {
+    // Lire le fichier index.html depuis le dossier assets
+    match tokio::fs::read_to_string("assets/index.html").await {
+        Ok(contents) => Ok(axum::response::Html(contents)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+// AJOUT: Import nécessaire pour la réponse
+use axum::response::IntoResponse;
