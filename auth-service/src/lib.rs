@@ -8,6 +8,9 @@ use axum_extra::extract::CookieJar;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir; // AJOUT: pour servir les fichiers statiques
 
+// AJOUT: Imports pour SQLx
+use sqlx::{PgPool, postgres::PgPoolOptions};
+
 // Import necessary modules
 pub mod domain;
 pub mod utils;
@@ -70,6 +73,12 @@ impl Application {
         self.server.await?;
         Ok(())
     }
+}
+
+// NOUVELLE FONCTION: Helper function pour créer une pool de connexions PostgreSQL
+pub async fn get_postgres_pool(url: &str) -> Result<PgPool, sqlx::Error> {
+    // Create a new PostgreSQL connection pool
+    PgPoolOptions::new().max_connections(5).connect(url).await
 }
 
 // NOUVELLE FONCTION: Servir la page de login depuis le fichier index.html

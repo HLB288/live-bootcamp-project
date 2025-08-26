@@ -1,22 +1,27 @@
 use auth_service::{
     Application,
     app_state::AppState,
-    services::{
-        hashmap_user_store::HashmapUserStore, 
-        hashset_banned_token_store::HashsetBannedTokenStore,
-        hashmap_two_fa_code_store::HashmapTwoFACodeStore,
-        mock_email_client::MockEmailClient, // AJOUT
+    get_postgres_pool,
+    services::data_stores::{ 
+        HashsetBannedTokenStore,
+        HashmapTwoFACodeStore,
+        PostgresUserStore,     // Changed from HashmapUserStore
     },
-    domain::data_stores::{UserStore, BannedTokenStore, TwoFACodeStore}, // AJOUT: TwoFACodeStore
-    utils::constants::prod,
+    services::MockEmailClient,
+    domain::data_stores::{UserStore, BannedTokenStore, TwoFACodeStore},
+    utils::constants::{prod, DATABASE_URL},
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use sqlx::PgPool;
 
 #[tokio::main]
 async fn main() {
-    // Create an instance of HashmapUserStore
-    let user_store = HashmapUserStore::default();
+    // Configure PostgreSQL and get the pool
+    let pg_pool = configure_postgresql().await;
+
+    // Create PostgresUserStore instead of HashmapUserStore
+    let user_store = PostgresUserStore::new(pg_pool);
     let boxed_user_store = Arc::new(RwLock::new(Box::new(user_store) as Box<dyn UserStore + Send + Sync>));
 
     // Create an instance of HashsetBannedTokenStore
@@ -27,7 +32,7 @@ async fn main() {
     let two_fa_code_store = HashmapTwoFACodeStore::new();
     let boxed_two_fa_code_store = Arc::new(RwLock::new(Box::new(two_fa_code_store) as Box<dyn TwoFACodeStore + Send + Sync>));
 
-    // AJOUT: Create an instance of MockEmailClient
+    // Create an instance of MockEmailClient
     let email_client = Arc::new(MockEmailClient);
 
     // Create an AppState instance with all stores and email client
@@ -35,7 +40,7 @@ async fn main() {
         boxed_user_store, 
         boxed_banned_token_store,
         boxed_two_fa_code_store,
-        email_client, // AJOUT
+        email_client,
     );
 
     // Build and run the application using the production address
@@ -44,4 +49,20 @@ async fn main() {
         .expect("Failed to build app");
 
     app.run().await.expect("Failed to run app");
+}
+
+// Helper function to configure PostgreSQL
+async fn configure_postgresql() -> PgPool {
+    // Create a new database connection pool
+    let pg_pool = get_postgres_pool(&DATABASE_URL)
+        .await
+        .expect("Failed to create Postgres connection pool!");
+
+    // Run database migrations against our database! 
+    sqlx::migrate!()
+        .run(&pg_pool)
+        .await
+        .expect("Failed to run migrations");
+
+    pg_pool
 }
