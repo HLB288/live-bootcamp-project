@@ -10,6 +10,7 @@ use tower_http::services::ServeDir; // AJOUT: pour servir les fichiers statiques
 
 // AJOUT: Imports pour SQLx
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use redis::{Client, RedisResult};
 
 // Import necessary modules
 pub mod domain;
@@ -88,6 +89,11 @@ async fn serve_login_page() -> Result<axum::response::Html<String>, StatusCode> 
         Ok(contents) => Ok(axum::response::Html(contents)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
+}
+
+pub fn get_redis_client(redis_hostname: String) -> RedisResult<Client> {
+    let redis_url = format!("redis://{}/", redis_hostname);
+    redis::Client::open(redis_url)
 }
 
 // AJOUT: Import nécessaire pour la réponse

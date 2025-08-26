@@ -38,4 +38,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/auth-service /usr/local/bin
 COPY --from=builder /app/assets /app/assets
 
+# New! Add Redis hostname environment variable
+ENV REDIS_HOST_NAME=redis
+
 ENTRYPOINT ["/usr/local/bin/auth-service"]

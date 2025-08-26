@@ -2,10 +2,11 @@ use auth_service::{
     Application,
     app_state::AppState,
     get_postgres_pool,
+    get_redis_client,
     services::data_stores::{ 
-        HashsetBannedTokenStore,
-        HashmapTwoFACodeStore,
-        PostgresUserStore,     // Changed from HashmapUserStore
+        RedisTwoFACodeStore, // Changé de HashmapTwoFACodeStore
+        PostgresUserStore,
+        RedisBannedTokenStore,
     },
     services::MockEmailClient,
     domain::data_stores::{UserStore, BannedTokenStore, TwoFACodeStore},
@@ -14,22 +15,29 @@ use auth_service::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use sqlx::PgPool;
+use redis::Connection;
 
 #[tokio::main]
 async fn main() {
     // Configure PostgreSQL and get the pool
     let pg_pool = configure_postgresql().await;
 
-    // Create PostgresUserStore instead of HashmapUserStore
+    // Configure Redis and get the connection
+    let redis_conn = configure_redis();
+
+    // Create PostgresUserStore
     let user_store = PostgresUserStore::new(pg_pool);
     let boxed_user_store = Arc::new(RwLock::new(Box::new(user_store) as Box<dyn UserStore + Send + Sync>));
 
-    // Create an instance of HashsetBannedTokenStore
-    let banned_token_store = HashsetBannedTokenStore::new();
+    // Create RedisBannedTokenStore
+    let banned_token_store = RedisBannedTokenStore::new(Arc::new(RwLock::new(redis_conn)));
     let boxed_banned_token_store = Arc::new(RwLock::new(Box::new(banned_token_store) as Box<dyn BannedTokenStore + Send + Sync>));
 
-    // Create an instance of HashmapTwoFACodeStore
-    let two_fa_code_store = HashmapTwoFACodeStore::new();
+    // Configure another Redis connection for 2FA code store
+    let redis_conn_2fa = configure_redis();
+    
+    // Create RedisTwoFACodeStore instead of HashmapTwoFACodeStore
+    let two_fa_code_store = RedisTwoFACodeStore::new(Arc::new(RwLock::new(redis_conn_2fa)));
     let boxed_two_fa_code_store = Arc::new(RwLock::new(Box::new(two_fa_code_store) as Box<dyn TwoFACodeStore + Send + Sync>));
 
     // Create an instance of MockEmailClient
@@ -65,4 +73,12 @@ async fn configure_postgresql() -> PgPool {
         .expect("Failed to run migrations");
 
     pg_pool
+}
+
+// Corrected helper function to configure Redis
+fn configure_redis() -> Connection {
+    get_redis_client(prod::REDIS_HOST_NAME.to_owned())
+        .expect("Failed to get Redis client")
+        .get_connection()
+        .expect("Failed to get Redis connection")
 }

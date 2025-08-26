@@ -1,15 +1,16 @@
 use auth_service::{
     Application,
     app_state::{AppState, BannedTokenStoreType, TwoFACodeStoreType},
-    get_postgres_pool, // Added
+    get_postgres_pool,
+    get_redis_client,
     services::data_stores::{
-        PostgresUserStore, // Changed from HashmapUserStore
-        HashsetBannedTokenStore,
-        HashmapTwoFACodeStore,
+        PostgresUserStore,
+        RedisBannedTokenStore,
+        RedisTwoFACodeStore, // Changé de HashmapTwoFACodeStore
     },
     services::MockEmailClient,
     domain::data_stores::{UserStore, BannedTokenStore, TwoFACodeStore, BannedTokenStoreError},
-    utils::constants::{test, DATABASE_URL}, // Added DATABASE_URL
+    utils::constants::{test, DATABASE_URL},
 };
 use reqwest::Response;
 use uuid::Uuid;
@@ -17,25 +18,10 @@ use tokio::sync::RwLock;
 use std::sync::Arc;
 use reqwest::cookie::Jar;
 use async_trait::async_trait;
-use sqlx::{PgPool, postgres::PgPoolOptions}; // Added
-use sqlx::Executor;
-// AJOUT: Wrapper pour partager la même instance entre l'app et les tests
-pub struct TestBannedTokenStoreWrapper {
-    inner: Arc<RwLock<HashsetBannedTokenStore>>,
-}
-
-#[async_trait]
-impl BannedTokenStore for TestBannedTokenStoreWrapper {
-    async fn add_token(&mut self, token: String) -> Result<(), BannedTokenStoreError> {
-        let mut store = self.inner.write().await;
-        store.add_token(token).await
-    }
-
-    async fn contains_token(&self, token: &str) -> Result<bool, BannedTokenStoreError> {
-        let store = self.inner.read().await;
-        store.contains_token(token).await
-    }
-}
+use sqlx::{PgPool, postgres::PgPoolOptions, PgConnection, Connection, Executor};
+use sqlx::postgres::PgConnectOptions;
+use std::str::FromStr;
+use redis;
 
 pub struct TestApp {
     pub address: String,
@@ -43,18 +29,30 @@ pub struct TestApp {
     pub banned_token_store: BannedTokenStoreType,
     pub two_fa_code_store: TwoFACodeStoreType,
     pub http_client: reqwest::Client,
+    pub db_name: String,
 }
 
 impl TestApp {
     pub async fn new() -> Self {
-        // Configure PostgreSQL with unique database for each test
-        let pg_pool = configure_postgresql().await;
+        // Generate unique database name for this test
+        let db_name = Uuid::new_v4().to_string();
         
-        // Use PostgresUserStore instead of HashmapUserStore
+        // Configure PostgreSQL with unique database for each test
+        let pg_pool = configure_postgresql(&db_name).await;
+        
+        // Configure Redis connections for tests
+        let redis_conn_banned = configure_redis();
+        let redis_conn_2fa = configure_redis();
+        
+        // Use PostgresUserStore
         let user_store = Arc::new(RwLock::new(Box::new(PostgresUserStore::new(pg_pool)) as Box<dyn UserStore + Send + Sync>));
         
-        let banned_token_store = Arc::new(RwLock::new(Box::new(HashsetBannedTokenStore::default()) as Box<dyn BannedTokenStore + Send + Sync>));
-        let two_fa_code_store = Arc::new(RwLock::new(Box::new(HashmapTwoFACodeStore::default()) as Box<dyn TwoFACodeStore + Send + Sync>));
+        // Use RedisBannedTokenStore
+        let banned_token_store = Arc::new(RwLock::new(Box::new(RedisBannedTokenStore::new(Arc::new(RwLock::new(redis_conn_banned)))) as Box<dyn BannedTokenStore + Send + Sync>));
+        
+        // Use RedisTwoFACodeStore instead of HashmapTwoFACodeStore
+        let two_fa_code_store = Arc::new(RwLock::new(Box::new(RedisTwoFACodeStore::new(Arc::new(RwLock::new(redis_conn_2fa)))) as Box<dyn TwoFACodeStore + Send + Sync>));
+        
         let email_client = Arc::new(MockEmailClient);
 
         let app_state = AppState::new(
@@ -92,6 +90,7 @@ impl TestApp {
             banned_token_store,
             two_fa_code_store,
             http_client,
+            db_name,
         }
     }
 
@@ -115,12 +114,10 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
-    // AJOUT: fonction utilitaire pour générer des emails aléatoires
     pub fn get_random_email() -> String {
         format!("{}@example.com", Uuid::new_v4())
     }
 
-    // CORRECTION: méthode qui accepte un body
     pub async fn post_login<Body>(&self, body: &Body) -> Response
     where
         Body: serde::Serialize,
@@ -133,7 +130,6 @@ impl TestApp {
             .expect("Failed to send request")
     }
 
-    // AJOUT: méthode pour login sans body (pour les tests qui l'attendent)
     pub async fn post_login_without_body(&self) -> Response {
         self.http_client
             .post(&format!("{}/login", &self.address))
@@ -142,7 +138,6 @@ impl TestApp {
             .expect("Failed to send request")
     }
 
-    // AJOUT: méthode pour login avec JSON malformé (pour 422)
     pub async fn post_login_malformed(&self) -> Response {
         self.http_client
             .post(&format!("{}/login", &self.address))
@@ -152,7 +147,6 @@ impl TestApp {
             .expect("Failed to send request")
     }
 
-    // AJOUT: alias pour compatibilité
     pub async fn post_login_with_body<Body>(&self, body: &Body) -> Response
     where
         Body: serde::Serialize,
@@ -168,7 +162,6 @@ impl TestApp {
             .expect("Failed to send request")
     }
 
-    // MODIFICATION: Maintenant accepte un body comme paramètre
     pub async fn post_verify_2fa<Body>(&self, body: &Body) -> Response
     where
         Body: serde::Serialize,
@@ -195,51 +188,87 @@ impl TestApp {
 }
 
 // Configure PostgreSQL for tests with unique database per test
-async fn configure_postgresql() -> PgPool {
+async fn configure_postgresql(db_name: &str) -> PgPool {
     let postgresql_conn_url = DATABASE_URL.to_owned();
-    // We are creating a new database for each test case, and we need to ensure each database has a unique name!
-    let db_name = Uuid::new_v4().to_string();
-    configure_database(&postgresql_conn_url, &db_name).await;
+    configure_database(&postgresql_conn_url, db_name).await;
     let postgresql_conn_url_with_db = format!("{}/{}", postgresql_conn_url, db_name);
-    // Create a new connection pool and return it
     get_postgres_pool(&postgresql_conn_url_with_db)
         .await
         .expect("Failed to create Postgres connection pool!")
 }
 
 async fn configure_database(db_conn_string: &str, db_name: &str) {
-    // Create database connection
     let connection = PgPoolOptions::new()
+        .max_connections(2)  // Réduire le nombre de connexions
+        .acquire_timeout(std::time::Duration::from_secs(30))  // Augmenter le timeout
         .connect(db_conn_string)
         .await
         .expect("Failed to create Postgres connection pool.");
 
-    // Create a new database
     connection
         .execute(format!(r#"CREATE DATABASE "{}";"#, db_name).as_str())
         .await
         .expect("Failed to create database.");
 
-    // Connect to new database
     let db_conn_string = format!("{}/{}", db_conn_string, db_name);
     let connection = PgPoolOptions::new()
+        .max_connections(2)  // Réduire le nombre de connexions
+        .acquire_timeout(std::time::Duration::from_secs(30))  // Augmenter le timeout
         .connect(&db_conn_string)
         .await
         .expect("Failed to create Postgres connection pool.");
 
-    // Run migrations against new database
     sqlx::migrate!()
         .run(&connection)
         .await
         .expect("Failed to migrate the database");
 }
 
-// AJOUT: fonction libre pour compatibilité
+// Function to configure Redis for tests
+fn configure_redis() -> redis::Connection {
+    get_redis_client(test::REDIS_HOST_NAME.to_owned())
+        .expect("Failed to get Redis client")
+        .get_connection()
+        .expect("Failed to get Redis connection")
+}
+
+// Helper function to delete test database (currently not used, but kept for future use)
+/*
+async fn delete_database(db_name: &str) {
+    let postgresql_conn_url: String = DATABASE_URL.to_owned();
+    let connection_options = PgConnectOptions::from_str(&postgresql_conn_url)
+        .expect("Failed to parse PostgreSQL connection string");
+    let mut connection = PgConnection::connect_with(&connection_options)
+        .await
+        .expect("Failed to connect to Postgres");
+
+    connection
+        .execute(
+            format!(
+                r#"
+                SELECT pg_terminate_backend(pg_stat_activity.pid)
+                FROM pg_stat_activity
+                WHERE pg_stat_activity.datname = '{}'
+                AND pid <> pg_backend_pid();
+                "#,
+                db_name
+            )
+            .as_str(),
+        )
+        .await
+        .expect("Failed to drop the database.");
+
+    connection
+        .execute(format!(r#"DROP DATABASE "{}";"#, db_name).as_str())
+        .await
+        .expect("Failed to drop the database.");
+}
+*/
+
 pub fn get_random_email() -> String {
     TestApp::get_random_email()
 }
 
-// AJOUT: Helper pour convertir les status codes
 pub fn assert_status_eq(actual: reqwest::StatusCode, expected: u16) {
     assert_eq!(actual.as_u16(), expected);
 }
