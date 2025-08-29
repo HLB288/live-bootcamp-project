@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use secrecy::{Secret, ExposeSecret};
 use crate::domain::user::User;
 use crate::domain::data_stores::{UserStoreError, UserStore};
+use crate::domain::{Email, Password};
 
 pub struct HashmapUserStore {
     users: HashMap<String, User>,
@@ -15,21 +17,21 @@ impl Default for HashmapUserStore {
 #[async_trait::async_trait]
 impl UserStore for HashmapUserStore {
     async fn add_user(&mut self, user: User) -> Result<(), UserStoreError> {
-        if self.users.contains_key(&user.email) {
+        if self.users.contains_key(user.email.as_ref().expose_secret()) {
             Err(UserStoreError::UserAlreadyExists)
         } else {
-            self.users.insert(user.email.clone(), user);
+            self.users.insert(user.email.as_ref().expose_secret().clone(), user);
             Ok(())
         }
     }
 
-    async fn get_user(&self, email: &str) -> Result<User, UserStoreError> { // CORRECTION: retourne User clonée
+    async fn get_user(&self, email: &str) -> Result<User, UserStoreError> { 
         self.users.get(email).cloned().ok_or(UserStoreError::UserNotFound)
     }
 
     async fn validate_user(&self, email: &str, password: &str) -> Result<(), UserStoreError> {
         match self.users.get(email) {
-            Some(user) if user.password == password => Ok(()),
+            Some(user) if user.password.as_ref().expose_secret() == password => Ok(()),
             Some(_) => Err(UserStoreError::InvalidCredentials),
             None => Err(UserStoreError::UserNotFound),
         }
@@ -39,12 +41,13 @@ impl UserStore for HashmapUserStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::Secret;
 
     fn create_test_user(email: &str, password: &str) -> User {
         User {
-            email: email.to_string(),
-            password: password.to_string(),
-            require_2fa: false,
+            email: Email::parse(Secret::new(email.to_string())).unwrap(),
+            password: Password::parse(Secret::new(password.to_string())).unwrap(),
+            requires_2fa: false,
         }
     }
 

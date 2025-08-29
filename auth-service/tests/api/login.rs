@@ -1,14 +1,16 @@
 use crate::helper::{get_random_email, TestApp};
 use auth_service::{
     utils::constants::JWT_COOKIE_NAME, 
-    domain::{error::ErrorResponse, Email, data_stores::TwoFACodeStore}, // AJOUT: Email et TwoFACodeStore
+    domain::{error::ErrorResponse, Email},
     routes::login::TwoFactorAuthResponse
 };
+use secrecy::ExposeSecret;
+use wiremock::{matchers::{method, path}, Mock, ResponseTemplate};
 
 #[tokio::test]
 async fn should_return_422_if_malformed_credentials() {
     let app = TestApp::new().await;
-    let response = app.post_login_malformed().await; // CORRECTION: JSON malformé = 422
+    let response = app.post_login_malformed().await; 
     assert_eq!(response.status().as_u16(), 422);
 }
 
@@ -107,6 +109,14 @@ async fn should_return_206_if_valid_credentials_and_2fa_enabled() {
     let response = app.post_signup(&signup_body).await;
     assert_eq!(response.status().as_u16(), 201);
 
+    // Define an expectation for the mock server
+    Mock::given(path("/email")) // Expect an HTTP request to the "/email" path
+        .and(method("POST")) // Expect the HTTP method to be POST
+        .respond_with(ResponseTemplate::new(200)) // Respond with an HTTP 200 OK status
+        .expect(1) // Expect this request to be made exactly once
+        .mount(&app.email_server) // Mount this expectation on the mock email server
+        .await; // Await the asynchronous operation to ensure the mock server is set up before proceeding
+
     // Tenter de se connecter avec les bonnes credentials
     let login_body = serde_json::json!({
         "email": random_email,
@@ -127,7 +137,7 @@ async fn should_return_206_if_valid_credentials_and_2fa_enabled() {
     assert_eq!(json_body.message, "2FA required".to_owned());
 
     // NOUVEAU: Vérifier que le login_attempt_id est stocké dans le 2FA code store
-    let email = Email(random_email);
+    let email = Email::parse(random_email.into()).unwrap();
     let two_fa_store = app.two_fa_code_store.read().await;
     
     // Vérifier que le code 2FA existe pour cet email
@@ -138,8 +148,8 @@ async fn should_return_206_if_valid_credentials_and_2fa_enabled() {
     
     // Vérifier que l'ID de tentative de connexion correspond à celui retourné dans la réponse
     assert_eq!(
-        stored_login_attempt_id.as_ref(), 
-        json_body.login_attempt_id,
+        stored_login_attempt_id.as_ref().expose_secret(), 
+        &json_body.login_attempt_id,
         "Login attempt ID in response should match the one stored in 2FA code store"
     );
 }

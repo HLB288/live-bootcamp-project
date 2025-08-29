@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use redis::{Commands, Connection};
 use tokio::sync::RwLock;
+use secrecy::{Secret, ExposeSecret};
+use color_eyre::eyre::Context;
 use crate::{
     domain::data_stores::{BannedTokenStore, BannedTokenStoreError},
     utils::auth::TOKEN_TTL_SECONDS,
@@ -18,34 +20,41 @@ impl RedisBannedTokenStore {
 
 #[async_trait::async_trait]
 impl BannedTokenStore for RedisBannedTokenStore {
-    async fn add_token(&mut self, token: String) -> Result<(), BannedTokenStoreError> {
-        // 1. Create a new key using the get_key helper function
-        let key = get_key(&token);
+    #[tracing::instrument(name = "Adding banned token to Redis", skip_all)]
+    async fn add_token(&mut self, token: Secret<String>) -> Result<(), BannedTokenStoreError> {
+        let token_key = get_key(token.expose_secret());
+        let value = true;
+        let ttl: u64 = TOKEN_TTL_SECONDS
+            .try_into()
+            .wrap_err("failed to cast TOKEN_TTL_SECONDS to u64")
+            .map_err(BannedTokenStoreError::UnexpectedError)?;
         
-        // 2. Cast TOKEN_TTL_SECONDS to u64
-        let ttl = TOKEN_TTL_SECONDS as u64;
-        
-        // 3. Get connection and call set_ex command
-        let mut conn = self.conn.write().await;
-        conn.set_ex::<String, bool, ()>(key, true, ttl)
-            .map_err(|_| BannedTokenStoreError::UnexpectedError)?;
+        let _: () = self
+            .conn
+            .write()
+            .await
+            .set_ex(&token_key, value, ttl)
+            .wrap_err("failed to set banned token in Redis")
+            .map_err(BannedTokenStoreError::UnexpectedError)?;
         
         Ok(())
     }
 
-    async fn contains_token(&self, token: &str) -> Result<bool, BannedTokenStoreError> {
-        // Create key and check if it exists
-        let key = get_key(token);
+    #[tracing::instrument(name = "Checking banned token in Redis", skip_all)]
+    async fn contains_token(&self, token: &Secret<String>) -> Result<bool, BannedTokenStoreError> {
+        let token_key = get_key(token.expose_secret());
+        let is_banned: bool = self
+            .conn
+            .write()
+            .await
+            .exists(&token_key)
+            .wrap_err("failed to check if token exists in Redis")
+            .map_err(BannedTokenStoreError::UnexpectedError)?;
         
-        let mut conn = self.conn.write().await;
-        let exists: bool = conn.exists(&key)
-            .map_err(|_| BannedTokenStoreError::UnexpectedError)?;
-        
-        Ok(exists)
+        Ok(is_banned)
     }
 }
 
-// We are using a key prefix to prevent collisions and organize data!
 const BANNED_TOKEN_KEY_PREFIX: &str = "banned_token:";
 
 fn get_key(token: &str) -> String {

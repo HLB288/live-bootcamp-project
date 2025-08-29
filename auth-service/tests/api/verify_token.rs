@@ -1,5 +1,6 @@
 use crate::helper::{get_random_email, TestApp}; // CORRECTION: helper au lieu de helpers
-use auth_service::{utils::constants::JWT_COOKIE_NAME, domain::data_stores::BannedTokenStore}; // AJOUT: import du trait BannedTokenStore
+use auth_service::utils::constants::JWT_COOKIE_NAME; // AJOUT: import du trait BannedTokenStore
+use secrecy::Secret;
 
 #[tokio::test]
 async fn should_return_422_if_malformed_input() {
@@ -110,7 +111,7 @@ async fn should_return_401_if_banned_token() {
 
     // Ban the token by adding it to the banned token store
     let mut banned_token_store = app.banned_token_store.write().await;
-    let _ = banned_token_store.add_token(token.clone()).await;
+    let _ = banned_token_store.add_token(Secret::new(token.clone())).await;
     drop(banned_token_store); // Release the lock
 
     // Attempt to verify the banned token

@@ -5,6 +5,7 @@ use crate::domain::{
     Email,
 };
 
+
 #[derive(Default)]
 pub struct HashmapTwoFACodeStore {
     codes: HashMap<Email, (LoginAttemptId, TwoFACode)>,
@@ -57,7 +58,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_and_get_code() {
         let mut store = HashmapTwoFACodeStore::new();
-        let email = Email("test@example.com".to_string());
+        let email = Email("test@example.com".to_string().into());
         let login_attempt_id = LoginAttemptId::default();
         let code = TwoFACode::default();
         
@@ -76,7 +77,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_nonexistent_code() {
         let store = HashmapTwoFACodeStore::new();
-        let email = Email("nonexistent@example.com".to_string());
+        let email = Email("nonexistent@example.com".to_string().into());
         
         let result = store.get_code(&email).await;
         assert!(matches!(result, Err(TwoFACodeStoreError::LoginAttemptIdNotFound)));
@@ -85,7 +86,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_code() {
         let mut store = HashmapTwoFACodeStore::new();
-        let email = Email("test@example.com".to_string());
+        let email = Email("test@example.com".to_string().into());
         let login_attempt_id = LoginAttemptId::default();
         let code = TwoFACode::default();
         
@@ -103,7 +104,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_nonexistent_code() {
         let mut store = HashmapTwoFACodeStore::new();
-        let email = Email("nonexistent@example.com".to_string());
+        let email = Email("nonexistent@example.com".to_string().into());
         
         let result = store.remove_code(&email).await;
         assert!(matches!(result, Err(TwoFACodeStoreError::LoginAttemptIdNotFound)));
@@ -112,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn test_overwrite_existing_code() {
         let mut store = HashmapTwoFACodeStore::new();
-        let email = Email("test@example.com".to_string());
+        let email = Email("test@example.com".to_string().into());
         let login_attempt_id1 = LoginAttemptId::default();
         let login_attempt_id2 = LoginAttemptId::default();
         let code1 = TwoFACode::parse("123456".to_string()).unwrap();

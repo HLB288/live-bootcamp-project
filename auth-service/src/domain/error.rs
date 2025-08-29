@@ -3,16 +3,25 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use color_eyre::eyre::Report;
+use thiserror::Error;
 use serde::Serialize;
+use std::error::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AuthAPIError {
-    UserAlreadyExists, 
-    InvalidCredentials, 
-    UnexpectedError,
+    #[error("User already exists")]
+    UserAlreadyExists,
+    #[error("Invalid credentials")]
+    InvalidCredentials,
+    #[error("Incorrect credentials")]
     IncorrectCredentials,
-    MissingToken, 
+    #[error("Missing token")]
+    MissingToken,
+    #[error("Invalid token")]
     InvalidToken,
+    #[error("Unexpected error")]
+    UnexpectedError(#[source] Report),
 }
 
 #[derive(Serialize, serde::Deserialize)] 
@@ -22,13 +31,15 @@ pub struct ErrorResponse {
 
 impl IntoResponse for AuthAPIError {
     fn into_response(self) -> Response {
+        log_error_chain(&self); // New!
+        
         let (status, error_message) = match self {
             AuthAPIError::UserAlreadyExists => (StatusCode::CONFLICT, "User already exists"),
             AuthAPIError::InvalidCredentials => (StatusCode::BAD_REQUEST, "Invalid credentials"),
-            AuthAPIError::IncorrectCredentials => (StatusCode::UNAUTHORIZED, "Authentication failed"),
-            AuthAPIError::MissingToken => (StatusCode::BAD_REQUEST, "JWT cookie missing"),
-            AuthAPIError::InvalidToken => (StatusCode::UNAUTHORIZED, "JWT is not valid"),
-            AuthAPIError::UnexpectedError => (StatusCode::INTERNAL_SERVER_ERROR, "Unexpected error"),
+            AuthAPIError::IncorrectCredentials => (StatusCode::UNAUTHORIZED, "Incorrect credentials"),
+            AuthAPIError::MissingToken => (StatusCode::BAD_REQUEST, "Missing auth token"),
+            AuthAPIError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid auth token"),
+            AuthAPIError::UnexpectedError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Unexpected error"),
         };
 
         let body = Json(ErrorResponse {
@@ -37,4 +48,17 @@ impl IntoResponse for AuthAPIError {
 
         (status, body).into_response()
     }
+}
+
+fn log_error_chain(e: &(dyn Error + 'static)) {
+    let separator = "\n-----------------------------------------------------------------------------------\n";
+    let mut report = format!("{}{:?}\n", separator, e);
+    let mut current = e.source();
+    while let Some(cause) = current {
+        let str = format!("Caused by:\n\n{:?}", cause);
+        report = format!("{}\n{}", report, str);
+        current = cause.source();
+    }
+    report = format!("{}\n{}", report, separator);
+    tracing::error!("{}", report);
 }

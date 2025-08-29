@@ -1,5 +1,7 @@
 use crate::helper::{get_random_email, TestApp}; // CORRECTION: helper au lieu de helpers
-use auth_service::{utils::constants::JWT_COOKIE_NAME, domain::data_stores::BannedTokenStore}; // AJOUT: import du trait BannedTokenStore
+use auth_service::utils::constants::JWT_COOKIE_NAME; 
+use secrecy::Secret;
+
 
 #[tokio::test]
 async fn should_return_200_if_valid_jwt_cookie() {
@@ -59,7 +61,7 @@ async fn should_return_200_if_valid_jwt_cookie() {
 
     // Check that the token was added to the banned token store
     let banned_token_store = app.banned_token_store.read().await;
-    let is_banned = banned_token_store.contains_token(&token).await.unwrap();
+    let is_banned = banned_token_store.contains_token(&Secret::new(token.clone())).await.unwrap();
     assert!(is_banned, "Token should be banned after logout");
 }
 

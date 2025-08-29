@@ -4,9 +4,12 @@ use argon2::{
     PasswordVerifier, Version,
 };
 use sqlx::PgPool;
+use color_eyre::eyre::{eyre, Context, Result};
+use secrecy::{ExposeSecret, Secret};
 use crate::domain::{
     data_stores::{UserStore, UserStoreError},
     user::User,
+    Email, Password,
 };
 
 pub struct PostgresUserStore {
@@ -21,40 +24,31 @@ impl PostgresUserStore {
 
 #[async_trait::async_trait]
 impl UserStore for PostgresUserStore {
+    #[tracing::instrument(name = "Adding user to PostgreSQL", skip_all)]
     async fn add_user(&mut self, user: User) -> Result<(), UserStoreError> {
-        // Hash the password before storing
-        let password_hash = compute_password_hash(&user.password).await
-            .map_err(|_| UserStoreError::UnexpectedError)?;
+        let password_hash = compute_password_hash(user.password.as_ref().clone())
+            .await
+            .map_err(UserStoreError::UnexpectedError)?;
 
-        // Insert user into database
-        let result = sqlx::query!(
+        sqlx::query!(
             r#"
             INSERT INTO users (email, password_hash, requires_2fa)
             VALUES ($1, $2, $3)
             "#,
-            user.email,
-            password_hash,
-            user.require_2fa
+            user.email.as_ref().expose_secret(),
+            password_hash.expose_secret(),
+            user.requires_2fa
         )
         .execute(&self.pool)
-        .await;
+        .await
+        .map_err(|e| UserStoreError::UnexpectedError(e.into()))?;
 
-        match result {
-            Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(db_err)) => {
-                // Check for unique constraint violation (duplicate email)
-                if db_err.constraint() == Some("users_pkey") {
-                    Err(UserStoreError::UserAlreadyExists)
-                } else {
-                    Err(UserStoreError::UnexpectedError)
-                }
-            }
-            Err(_) => Err(UserStoreError::UnexpectedError),
-        }
+        Ok(())
     }
 
+    #[tracing::instrument(name = "Retrieving user from PostgreSQL", skip_all)]
     async fn get_user(&self, email: &str) -> Result<User, UserStoreError> {
-        let result = sqlx::query!(
+        sqlx::query!(
             r#"
             SELECT email, password_hash, requires_2fa
             FROM users
@@ -62,22 +56,23 @@ impl UserStore for PostgresUserStore {
             "#,
             email
         )
-        .fetch_one(&self.pool)
-        .await;
-
-        match result {
-            Ok(row) => Ok(User {
-                email: row.email,
-                password: row.password_hash, // Note: this is the hashed password
-                require_2fa: row.requires_2fa,
-            }),
-            Err(sqlx::Error::RowNotFound) => Err(UserStoreError::UserNotFound),
-            Err(_) => Err(UserStoreError::UnexpectedError),
-        }
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| UserStoreError::UnexpectedError(e.into()))?
+        .map(|row| {
+            Ok(User {
+                email: Email::parse(Secret::new(row.email))
+                    .map_err(UserStoreError::UnexpectedError)?,
+                password: Password::parse(Secret::new(row.password_hash))
+                    .map_err(UserStoreError::UnexpectedError)?,
+                requires_2fa: row.requires_2fa,
+            })
+        })
+        .ok_or(UserStoreError::UserNotFound)?
     }
 
+    #[tracing::instrument(name = "Validating user credentials in PostgreSQL", skip_all)]
     async fn validate_user(&self, email: &str, password: &str) -> Result<(), UserStoreError> {
-        // Get user from database
         let result = sqlx::query!(
             r#"
             SELECT password_hash
@@ -91,44 +86,61 @@ impl UserStore for PostgresUserStore {
 
         match result {
             Ok(row) => {
-                // Verify password against stored hash
-                verify_password_hash(&row.password_hash, password).await
-                    .map_err(|_| UserStoreError::InvalidCredentials)
+                verify_password_hash(
+                    Secret::new(row.password_hash), 
+                    Secret::new(password.to_string())
+                ).await
+                    .map_err(UserStoreError::UnexpectedError)
             }
             Err(sqlx::Error::RowNotFound) => Err(UserStoreError::UserNotFound),
-            Err(_) => Err(UserStoreError::UnexpectedError),
+            Err(e) => Err(UserStoreError::UnexpectedError(e.into())),
         }
     }
 }
 
-// Helper function to verify if a given password matches an expected hash
-// TODO: Hashing is a CPU-intensive operation. To avoid blocking
-// other async tasks, update this function to perform hashing on a
-// separate thread pool using tokio::task::spawn_blocking. Note that you
-// will need to update the input parameters to be String types instead of &str
+#[tracing::instrument(name = "Verify password hash", skip_all)]
 async fn verify_password_hash(
-    expected_password_hash: &str,
-    password_candidate: &str,
-) -> Result<(), Box<dyn Error>> {
-    let expected_password_hash: PasswordHash<'_> = PasswordHash::new(expected_password_hash)?;
-    Argon2::default()
-        .verify_password(password_candidate.as_bytes(), &expected_password_hash)
-        .map_err(|e| e.into())
+    expected_password_hash: Secret<String>,
+    password_candidate: Secret<String>,
+) -> Result<()> {
+    let current_span: tracing::Span = tracing::Span::current();
+    let result = tokio::task::spawn_blocking(move || {
+        current_span.in_scope(|| {
+            let expected_password_hash: PasswordHash<'_> =
+                PasswordHash::new(expected_password_hash.expose_secret())?;
+
+            Argon2::default()
+                .verify_password(
+                    password_candidate.expose_secret().as_bytes(),
+                    &expected_password_hash,
+                )
+                .wrap_err("failed to verify password hash")
+        })
+    })
+    .await;
+
+    result?
 }
 
-// Helper function to hash passwords before persisting them in the database.
-// TODO: Hashing is a CPU-intensive operation. To avoid blocking
-// other async tasks, update this function to perform hashing on a
-// separate thread pool using tokio::task::spawn_blocking. Note that you
-// will need to update the input parameters to be String types instead of &str
-async fn compute_password_hash(password: &str) -> Result<String, Box<dyn Error>> {
-    let salt: SaltString = SaltString::generate(&mut rand::thread_rng());
-    let password_hash = Argon2::new(
-        Algorithm::Argon2id,
-        Version::V0x13,
-        Params::new(15000, 2, 1, None)?,
-    )
-    .hash_password(password.as_bytes(), &salt)?
-    .to_string();
-    Ok(password_hash)
+#[tracing::instrument(name = "Computing password hash", skip_all)]
+async fn compute_password_hash(password: Secret<String>) -> Result<Secret<String>> {
+    let current_span: tracing::Span = tracing::Span::current();
+
+    let result = tokio::task::spawn_blocking(move || {
+        current_span.in_scope(|| {
+            let salt: SaltString = SaltString::generate(&mut rand::thread_rng());
+            let password_hash = Argon2::new(
+                Algorithm::Argon2id,
+                Version::V0x13,
+                Params::new(15000, 2, 1, None)?,
+            )
+            .hash_password(password.expose_secret().as_bytes(), &salt)?
+            .to_string();
+
+            Ok(Secret::new(password_hash))
+        })
+    })
+    .await;
+
+    result?
 }
